@@ -7,3 +7,5 @@ preprocessed/
 *.pkl
 *.hdf5
 *.csv
+tensorboard_runs/
+*.tsv

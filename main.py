@@ -2,9 +2,11 @@
 import time
 import argparse
 # Import custom modules
-from task.preprocessing import preprocessing
-from task.training import training
-from task.testing import testing
+# from task.preprocessing import preprocessing
+from task.frame.frame_classification import frame_detection
+from task.frame.cnn_frame_detection import cnn_frame_detection
+# from task.training import training
+# from task.testing import testing
 # Utils
 from utils import str2bool, path_check
 
@@ -15,14 +17,20 @@ def main(args):
     # Path setting
     path_check(args)
 
-    if args.preprocessing:
-        preprocessing(args)
+    # if args.preprocessing:
+    #     preprocessing(args)
 
-    if args.training:
-        training(args)
+    if args.frame_detection:
+        frame_detection(args)
 
-    if args.testing:
-        testing(args)
+    if args.cnn_frame_detection:
+        cnn_frame_detection(args)
+
+    # if args.training:
+    #     training(args)
+
+    # if args.testing:
+    #     testing(args)
 
     # Time calculate
     print(f'Done! ; {round((time.time()-total_start_time)/60, 3)}min spend')
@@ -31,6 +39,8 @@ if __name__=='__main__':
     parser = argparse.ArgumentParser(description='Parsing Method')
     # Task setting
     parser.add_argument('--preprocessing', action='store_true')
+    parser.add_argument('--frame_detection', action='store_true')
+    parser.add_argument('--cnn_frame_detection', action='store_true')
     parser.add_argument('--training', action='store_true')
     parser.add_argument('--testing', action='store_true')
     parser.add_argument('--resume', action='store_true')
@@ -43,13 +53,13 @@ if __name__=='__main__':
                         help='Data name; Default is cnn_dailymail')
     parser.add_argument('--cnn_dailymail_ver', default='3.0.0', type=str,
                         help='; Default is 3.0.0')
-    parser.add_argument('--model_save_path', default='/mnt/md0/kyohoon/model_checkpoint/latent', type=str,
+    parser.add_argument('--model_save_path', default='/mnt/md0/kyohoon/model_checkpoint/frame', type=str,
                         help='Model checkpoint file path')
     parser.add_argument('--result_path', default='./results', type=str,
                         help='Results file path')
     # Preprocessing setting
     parser.add_argument('--tokenizer', default='spm', choices=[
-        'spm', 'bert', 'bart', 'T5'
+        'spm', 'bert', 'bart', 'T5', 'roberta'
             ], help='Tokenizer select; Default is spm')
     parser.add_argument('--sentencepiece_model', default='unigram', choices=['unigram', 'bpe', 'word', 'char'],
                         help="Google's SentencePiece model type; Default is unigram")
@@ -74,7 +84,7 @@ if __name__=='__main__':
     # Model setting
     # 0) Model selection
     parser.add_argument('--model_type', default='custom_transformer', type=str, choices=[
-        'custom_transformer', 'bart', 'T5', 'bert'
+        'custom_transformer', 'bart', 'T5', 'bert', 'roberta'
             ], help='Model type selection; Default is custom_transformer')
     parser.add_argument('--isPreTrain', default=False, type=str2bool,
                         help='Using pre-trained model; Default is False')
@@ -150,7 +160,13 @@ if __name__=='__main__':
                         help='Beam search length normalization; Default is 0.7')
     parser.add_argument('--repetition_penalty', default=1.3, type=float, 
                         help='Beam search repetition penalty term; Default is 1.3')
-    # Print frequency
+    # Seed & Logging setting
+    parser.add_argument('--seed', default=42, type=int,
+                        help='Random seed; Default is 42')
+    parser.add_argument('--use_tensorboard', default=True, type=str2bool,
+                        help='Using tensorboard; Default is True')
+    parser.add_argument('--tensorboard_path', default='./tensorboard_runs', type=str,
+                        help='Tensorboard log path; Default is ./tensorboard_runs')
     parser.add_argument('--print_freq', default=100, type=int, 
                         help='Print training process frequency; Default is 100')
     args = parser.parse_args()
