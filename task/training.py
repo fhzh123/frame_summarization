@@ -12,6 +12,9 @@ from torch.nn import functional as F
 from torch.utils.data import DataLoader
 from torch.nn.utils import clip_grad_norm_
 from torch.cuda.amp import GradScaler, autocast
+# Import Huggingface
+from datasets import load_dataset
+from transformers import AutoTokenizer
 # Import custom modules
 from model.dataset import CustomDataset
 from model.custom_transformer.transformer import Transformer
@@ -55,34 +58,53 @@ def training(args):
     #===================================#
 
     # 1) Data open
+    src_list = dict()
+    trg_list = dict()
+
     write_log(logger, "Load data...")
     gc.disable()
 
     # Path checking
-    save_path = os.path.join(args.preprocess_path, args.data_name, args.tokenizer)
-    if args.tokenizer == 'spm':
-        save_path = os.path.join(save_path, f'{args.sentencepiece_model}_src_{args.src_vocab_size}_trg_{args.trg_vocab_size}')
+    dataset = load_dataset("cnn_dailymail", "3.0.0")
 
-    with h5py.File(os.path.join(save_path, 'processed.hdf5'), 'r') as f:
-        train_src_input_ids = f.get('train_src_input_ids')[:]
-        train_src_attention_mask = f.get('train_src_attention_mask')[:]
-        valid_src_input_ids = f.get('valid_src_input_ids')[:]
-        valid_src_attention_mask = f.get('valid_src_attention_mask')[:]
-        train_trg_input_ids = f.get('train_trg_input_ids')[:]
-        train_trg_attention_mask = f.get('train_trg_attention_mask')[:]
-        valid_trg_input_ids = f.get('valid_trg_input_ids')[:]
-        valid_trg_attention_mask = f.get('valid_trg_attention_mask')[:]
+    train_dat = dataset['train']
+    valid_dat = dataset['validation']
+    test_dat = dataset['test']
 
-    with open(os.path.join(save_path, 'word2id.pkl'), 'rb') as f:
-        data_ = pickle.load(f)
-        src_word2id = data_['src_word2id']
-        src_vocab_num = len(src_word2id)
-        trg_word2id = data_['trg_word2id']
-        trg_vocab_num = len(trg_word2id)
-        del data_
+    src_list['train'] = train_dat['article']
+    trg_list['train'] = train_dat['highlights']
+
+    src_list['valid'] = valid_dat['article']
+    trg_list['valid'] = valid_dat['highlights']
+    
+    src_list['test'] = test_dat['article']
+    trg_list['test'] = test_dat['highlights']
 
     gc.enable()
     write_log(logger, "Finished loading data!")
+
+    write_log(logger, "CustomDataset setting...")
+    tokenizer_name = return_model_name(args.encoder_model_type)
+    tokenizer = AutoTokenizer.from_pretrained(tokenizer_name)
+    src_vocab_num = tokenizer.vocab_size
+
+    dataset_dict = {
+        'train': CustomDataset(tokenizer=tokenizer,
+                               src_list=src_list['train'], trg_list=trg_list['train'], 
+                               src_max_len=args.src_max_len, trg_max_len=args.trg_max_len),
+        'valid': CustomDataset(tokenizer=tokenizer,
+                               src_list=src_list['valid'], trg_list=trg_list['valid'], 
+                               src_max_len=args.src_max_len, trg_max_len=args.trg_max_len)
+    }
+    dataloader_dict = {
+        'train': DataLoader(dataset_dict['train'], drop_last=True,
+                            batch_size=args.batch_size, shuffle=True,
+                            pin_memory=True, num_workers=args.num_workers),
+        'valid': DataLoader(dataset_dict['valid'], drop_last=False,
+                            batch_size=args.batch_size, shuffle=True, 
+                            pin_memory=True, num_workers=args.num_workers)
+    }
+    write_log(logger, f"Total number of trainingsets iterations - {len(dataset_dict['train'])}, {len(dataloader_dict['train'])}")
 
     #===================================#
     #===========Train setting===========#
@@ -90,53 +112,13 @@ def training(args):
 
     # 1) Model initiating
     write_log(logger, 'Instantiating model...')
-    if args.model_type == 'custom_transformer':
-        model = Transformer(src_vocab_num=src_vocab_num, trg_vocab_num=trg_vocab_num,
-                            pad_idx=args.pad_id, bos_idx=args.bos_id, eos_idx=args.eos_id,
-                            d_model=args.d_model, d_embedding=args.d_embedding, n_head=args.n_head,
-                            dim_feedforward=args.dim_feedforward,
-                            num_common_layer=args.num_common_layer, num_encoder_layer=args.num_encoder_layer,
-                            num_decoder_layer=args.num_decoder_layer,
-                            src_max_len=args.src_max_len, trg_max_len=args.trg_max_len,
-                            dropout=args.dropout, embedding_dropout=args.embedding_dropout,
-                            trg_emb_prj_weight_sharing=args.trg_emb_prj_weight_sharing,
-                            emb_src_trg_weight_sharing=args.emb_src_trg_weight_sharing, 
-                            variational_mode=args.variational_mode, z_var=args.z_var,
-                            parallel=args.parallel)
-        tgt_subsqeunt_mask = model.generate_square_subsequent_mask(args.trg_max_len - 1, device)
-    elif args.model_type == 'T5':
-        model = custom_T5(isPreTrain=args.isPreTrain, d_latent=args.d_latent, 
-                          variational_mode=args.variational_mode, z_var=args.z_var,
-                          decoder_full_model=True, device=device)
-        tgt_subsqeunt_mask = None
-    elif args.model_type == 'bart':
-        model = custom_Bart(isPreTrain=args.isPreTrain, PreTrainMode='large',
-                            variational_mode=args.variational_mode, z_var=args.z_var,
-                            d_latent=args.d_latent, emb_src_trg_weight_sharing=args.emb_src_trg_weight_sharing)
-        tgt_subsqeunt_mask = None
-    model = model.to(device)
+    model = TransformerModel(encoder_model_type=args.encoder_model_type, decoder_model_type=args.decoder_model_type, 
+                             isPreTrain=args.isPreTrain, encoder_out_mix_ratio=args.encoder_out_mix_ratio,
+                             encoder_out_cross_attention=args.encoder_out_cross_attention,
+                             encoder_out_to_augmenter=args.encoder_out_to_augmenter, classify_method=args.classify_method,
+                             src_max_len=args.src_max_len, num_labels=num_labels, dropout=args.dropout)
+    model.to(device)
 
-    # 2) Dataloader setting
-    dataset_dict = {
-        'train': CustomDataset(src_list=train_src_input_ids, src_att_list=train_src_attention_mask,
-                               trg_list=train_trg_input_ids, trg_att_list=train_trg_attention_mask,
-                               src_max_len=args.src_max_len, trg_max_len=args.trg_max_len,
-                               pad_idx=model.pad_idx, eos_idx=model.eos_idx),
-        'valid': CustomDataset(src_list=valid_src_input_ids, src_att_list=valid_src_attention_mask,
-                               trg_list=valid_trg_input_ids, trg_att_list=valid_trg_attention_mask,
-                               src_max_len=args.src_max_len, trg_max_len=args.trg_max_len,
-                               pad_idx=model.pad_idx, eos_idx=model.eos_idx),
-    }
-    dataloader_dict = {
-        'train': DataLoader(dataset_dict['train'], drop_last=True,
-                            batch_size=args.batch_size, shuffle=True, pin_memory=True,
-                            num_workers=args.num_workers),
-        'valid': DataLoader(dataset_dict['valid'], drop_last=False,
-                            batch_size=args.batch_size, shuffle=False, pin_memory=True,
-                            num_workers=args.num_workers)
-    }
-    write_log(logger, f"Total number of trainingsets  iterations - {len(dataset_dict['train'])}, {len(dataloader_dict['train'])}")
-    
     # 3) Optimizer & Learning rate scheduler setting
     optimizer = optimizer_select(model, args)
     scheduler = shceduler_select(optimizer, dataloader_dict, args)
@@ -181,13 +163,13 @@ def training(args):
                 optimizer.zero_grad(set_to_none=True)
 
                 # Input, output setting
-                src_sequence = batch_iter[0]
-                src_att = batch_iter[1]
-                trg_sequence = batch_iter[2]
-                trg_att = batch_iter[3]
-
+                src_sequence = batch_iter[0][0]
+                src_att = batch_iter[0][1]
                 src_sequence = src_sequence.to(device, non_blocking=True)
                 src_att = src_att.to(device, non_blocking=True)
+
+                trg_sequence = batch_iter[1][0]
+                trg_att = batch_iter[1][2]
                 trg_sequence = trg_sequence.to(device, non_blocking=True)
                 trg_att = trg_att.to(device, non_blocking=True)
 
