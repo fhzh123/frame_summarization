@@ -5,7 +5,7 @@ import argparse
 # from task.preprocessing import preprocessing
 from task.frame.frame_classification import frame_detection
 from task.frame.cnn_frame_detection import cnn_frame_detection
-# from task.training import training
+from task.training import training
 # from task.testing import testing
 # Utils
 from utils import str2bool, path_check
@@ -15,7 +15,7 @@ def main(args):
     total_start_time = time.time()
 
     # Path setting
-    path_check(args)
+    # path_check(args)
 
     # if args.preprocessing:
     #     preprocessing(args)
@@ -26,8 +26,8 @@ def main(args):
     if args.cnn_frame_detection:
         cnn_frame_detection(args)
 
-    # if args.training:
-    #     training(args)
+    if args.training:
+        training(args)
 
     # if args.testing:
     #     testing(args)
@@ -53,7 +53,7 @@ if __name__=='__main__':
                         help='Data name; Default is cnn_dailymail')
     parser.add_argument('--cnn_dailymail_ver', default='3.0.0', type=str,
                         help='; Default is 3.0.0')
-    parser.add_argument('--model_save_path', default='/mnt/md0/kyohoon/model_checkpoint/frame', type=str,
+    parser.add_argument('--model_save_path', default='/mnt/storage1/kyohoon1/results', type=str,
                         help='Model checkpoint file path')
     parser.add_argument('--result_path', default='./results', type=str,
                         help='Results file path')
@@ -86,8 +86,8 @@ if __name__=='__main__':
     parser.add_argument('--model_type', default='custom_transformer', type=str, choices=[
         'custom_transformer', 'bart', 'T5', 'bert', 'roberta'
             ], help='Model type selection; Default is custom_transformer')
-    parser.add_argument('--isPreTrain', default=False, type=str2bool,
-                        help='Using pre-trained model; Default is False')
+    parser.add_argument('--isPreTrain', default=True, type=str2bool,
+                        help='Using pre-trained model; Default is True')
     # 1) Custom Transformer
     parser.add_argument('--d_model', default=768, type=int, 
                         help='Transformer model dimension; Default is 768')
@@ -133,8 +133,8 @@ if __name__=='__main__':
     parser.add_argument('--z_var', default=2, type=int)
     parser.add_argument('--min_len', default=4, type=int, 
                         help="Sentences's minimum length; Default is 4")
-    parser.add_argument('--src_max_len', default=300, type=int, 
-                        help="Source sentences's maximum length; Default is 300")
+    parser.add_argument('--src_max_len', default=768, type=int, 
+                        help="Source sentences's maximum length; Default is 768")
     parser.add_argument('--trg_max_len', default=300, type=int, 
                         help="Target sentences's maximum length; Default is 300")
     parser.add_argument('--num_epochs', default=100, type=int, 

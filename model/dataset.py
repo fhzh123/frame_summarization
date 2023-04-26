@@ -11,6 +11,7 @@ class CustomDataset(Dataset):
 
         self.min_len = min_len
         self.src_max_len = src_max_len
+        self.trg_max_len = trg_max_len
 
         for src in src_list:
             if min_len <= len(src):
@@ -46,7 +47,7 @@ class CustomDataset(Dataset):
         trg_input_ids = trg_encoded_dict['input_ids'].squeeze(0)
         trg_attention_mask = trg_encoded_dict['attention_mask'].squeeze(0)
 
-        return (src_input_ids, src_attention_mask), (trg_input_ids, trg_attention_mask)
+        return src_input_ids, src_attention_mask, trg_input_ids, trg_attention_mask
 
     def __len__(self):
         return self.num_data

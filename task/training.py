@@ -17,11 +17,11 @@ from datasets import load_dataset
 from transformers import AutoTokenizer
 # Import custom modules
 from model.dataset import CustomDataset
-from model.custom_transformer.transformer import Transformer
-from model.custom_plm.T5 import custom_T5
+# from model.custom_transformer.transformer import Transformer
+# from model.custom_plm.T5 import custom_T5
 from model.custom_plm.bart import custom_Bart
-from model.optimizer.utils import shceduler_select, optimizer_select
 from utils import TqdmLoggingHandler, write_log
+from optimizer.utils import shceduler_select, optimizer_select
 
 def label_smoothing_loss(pred, gold, trg_pad_idx, smoothing_eps=0.1):
     ''' Calculate cross entropy loss, apply label smoothing if needed. '''
@@ -84,8 +84,7 @@ def training(args):
     write_log(logger, "Finished loading data!")
 
     write_log(logger, "CustomDataset setting...")
-    tokenizer_name = return_model_name(args.encoder_model_type)
-    tokenizer = AutoTokenizer.from_pretrained(tokenizer_name)
+    tokenizer = AutoTokenizer.from_pretrained('facebook/bart-large')
     src_vocab_num = tokenizer.vocab_size
 
     dataset_dict = {
@@ -112,11 +111,8 @@ def training(args):
 
     # 1) Model initiating
     write_log(logger, 'Instantiating model...')
-    model = TransformerModel(encoder_model_type=args.encoder_model_type, decoder_model_type=args.decoder_model_type, 
-                             isPreTrain=args.isPreTrain, encoder_out_mix_ratio=args.encoder_out_mix_ratio,
-                             encoder_out_cross_attention=args.encoder_out_cross_attention,
-                             encoder_out_to_augmenter=args.encoder_out_to_augmenter, classify_method=args.classify_method,
-                             src_max_len=args.src_max_len, num_labels=num_labels, dropout=args.dropout)
+    model = custom_Bart(isPreTrain=args.isPreTrain, PreTrainMode='base',
+                        emb_src_trg_weight_sharing=args.emb_src_trg_weight_sharing)
     model.to(device)
 
     # 3) Optimizer & Learning rate scheduler setting
@@ -163,51 +159,46 @@ def training(args):
                 optimizer.zero_grad(set_to_none=True)
 
                 # Input, output setting
-                src_sequence = batch_iter[0][0]
-                src_att = batch_iter[0][1]
+                src_sequence = batch_iter[0]
+                src_att = batch_iter[1]
                 src_sequence = src_sequence.to(device, non_blocking=True)
                 src_att = src_att.to(device, non_blocking=True)
 
-                trg_sequence = batch_iter[1][0]
-                trg_att = batch_iter[1][2]
+                trg_sequence = batch_iter[2]
+                trg_att = batch_iter[3]
                 trg_sequence = trg_sequence.to(device, non_blocking=True)
                 trg_att = trg_att.to(device, non_blocking=True)
 
                 # Output pre-processing
-                trg_sequence_gold = trg_sequence[:, 1:]
-                non_pad = trg_sequence_gold != model.pad_idx
-                trg_sequence_gold = trg_sequence_gold[non_pad].contiguous().view(-1)
+                # trg_sequence_gold = trg_sequence[:, 1:]
+                non_pad = trg_sequence != model.pad_idx
+                trg_sequence_gold = trg_sequence[non_pad].contiguous().view(-1)
 
                 # Train
                 if phase == 'train':
-                    with autocast():
-                        predicted, dist_loss = model(src_input_ids=src_sequence, src_attention_mask=src_att,
-                                                     trg_input_ids=trg_sequence, trg_attention_mask=trg_att,
-                                                     non_pad_position=non_pad, tgt_subsqeunt_mask=tgt_subsqeunt_mask)
-                        predicted = predicted.view(-1, predicted.size(-1))
-                        sum_loss = label_smoothing_loss(predicted, trg_sequence_gold, 
-                                                        trg_pad_idx=model.pad_idx,
-                                                        smoothing_eps=args.label_smoothing_eps)
-                        total_loss = sum_loss + dist_loss
+                    predicted = model(src_input_ids=src_sequence, src_attention_mask=src_att,
+                                    trg_input_ids=trg_sequence, trg_attention_mask=trg_att,
+                                    non_pad_position=non_pad)
+                    predicted = predicted.view(-1, predicted.size(-1))
+                    loss = label_smoothing_loss(predicted, trg_sequence_gold, 
+                                                trg_pad_idx=model.pad_idx,
+                                                smoothing_eps=args.label_smoothing_eps)
 
-                    scaler.scale(total_loss).backward()
-                    if args.clip_grad_norm > 0:
-                        scaler.unscale_(optimizer)
-                        clip_grad_norm_(model.parameters(), args.clip_grad_norm)
-                    scaler.step(optimizer)
-                    scaler.update()
+                    loss.backward()
+                    clip_grad_norm_(model.parameters(), args.clip_grad_norm)
+                    optimizer.step()
 
                     if args.scheduler in ['constant', 'warmup']:
                         scheduler.step()
                     if args.scheduler == 'reduce_train':
-                        scheduler.step(total_loss)
+                        scheduler.step(loss)
 
                     # Print loss value only training
                     if i == 0 or freq == args.print_freq or i==len(dataloader_dict['train']):
                         acc = (predicted.max(dim=1)[1] == trg_sequence_gold).sum() / len(trg_sequence_gold)
-                        iter_log = "[Epoch:%03d][%03d/%03d] train_seq_loss:%03.2f | train_latent_loss:%03.2f | train_acc:%03.2f%% | learning_rate:%1.6f | spend_time:%02.2fmin" % \
+                        iter_log = "[Epoch:%03d][%03d/%03d] train_seq_loss:%03.2f | train_acc:%03.2f%% | learning_rate:%1.6f | spend_time:%02.2fmin" % \
                             (epoch, i, len(dataloader_dict['train']), 
-                            nmt_loss.item(), dist_loss.item(), acc*100, optimizer.param_groups[0]['lr'], 
+                            loss.item(), acc*100, optimizer.param_groups[0]['lr'], 
                             (time() - start_time_e) / 60)
                         write_log(logger, iter_log)
                         freq = 0
@@ -216,11 +207,11 @@ def training(args):
                 # Validation
                 if phase == 'valid':
                     with torch.no_grad():
-                        predicted, dist_loss = model(src_input_ids=src_sequence, src_attention_mask=src_att,
-                                                     trg_input_ids=trg_sequence, trg_attention_mask=trg_att,
-                                                     non_pad_position=non_pad, tgt_subsqeunt_mask=tgt_subsqeunt_mask)
+                        predicted = model(src_input_ids=src_sequence, src_attention_mask=src_att,
+                                        trg_input_ids=trg_sequence, trg_attention_mask=trg_att,
+                                        non_pad_position=non_pad)
                         sum_loss = F.cross_entropy(predicted, trg_sequence_gold, ignore_index=model.pad_idx)
-                        total_loss = sum_loss + dist_loss
+                        total_loss = sum_loss
                     val_loss += total_loss.item()
                     val_acc += (predicted.max(dim=1)[1] == trg_sequence_gold).sum() / len(trg_sequence_gold)
 
@@ -239,12 +230,8 @@ def training(args):
                 save_path = os.path.join(args.model_save_path, args.data_name, args.tokenizer)
                 if not os.path.exists(save_path):
                     os.mkdir(save_path)
-                if args.tokenizer == 'spm':
-                    save_file_name = os.path.join(save_path, 
-                                                f'checkpoint_src_{args.src_vocab_size}_trg_{args.trg_vocab_size}_v_{args.variational_mode}_p_{args.parallel}.pth.tar')
-                else:
-                    save_file_name = os.path.join(save_path, 
-                                                f'checkpoint_v_{args.variational_mode}_p_{args.parallel}.pth.tar')
+                save_file_name = os.path.join(save_path, 
+                                            f'checkpoint_v_{args.variational_mode}_p_{args.parallel}.pth.tar')
                                                 
                 if val_loss < best_val_loss:
                     write_log(logger, 'Checkpoint saving...')

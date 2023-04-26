@@ -5,12 +5,9 @@ import torch.nn as nn
 from torch.autograd import Variable
 # Import Huggingface
 from transformers import BartModel, BartConfig
-#
-from ..latent_module.latent import Latent_module 
 
 class custom_Bart(nn.Module):
     def __init__(self, isPreTrain, PreTrainMode,
-                 variational_mode, d_latent, z_var,
                  emb_src_trg_weight_sharing: bool =True):
         super().__init__()
 
@@ -19,7 +16,6 @@ class custom_Bart(nn.Module):
         
         Args:
             isPreTrain (dictionary): encoder transformer's configuration
-            d_latent (int): latent dimension size
             device (torch.device): 
         Returns:
             log_prob (torch.Tensor): log probability of each word 
@@ -27,13 +23,15 @@ class custom_Bart(nn.Module):
             log_var (torch.Tensor): log variance of latent vector
             z (torch.Tensor): sampled latent vector
         """
-        self.d_latent = d_latent
         self.isPreTrain = isPreTrain
         self.PreTrainMode = PreTrainMode
         self.emb_src_trg_weight_sharing = emb_src_trg_weight_sharing
         self.model_config = BartConfig.from_pretrained(f'facebook/bart-{self.PreTrainMode}')
         self.model_config.use_cache = False
+
+        # Encoder model setting
         self.pad_idx = self.model_config.pad_token_id
+        self.decoder_start_token_id = self.model_config.decoder_start_token_id
 
         if self.isPreTrain:
             self.model = BartModel.from_pretrained(f'facebook/bart-{self.PreTrainMode}')
@@ -49,24 +47,21 @@ class custom_Bart(nn.Module):
         # 
         self.lm_head = nn.Linear(self.model_config.d_model, self.model.shared.num_embeddings, bias=False)
 
-        # Variational model setting
-        self.variational_mode = variational_mode
-        self.latent_module = Latent_module(self.d_hidden, d_latent, variational_mode, z_var)
+        # Frame 
+        # self.frame_embedding = nn.Embedding(num_embeddings=7, )
 
     def forward(self, src_input_ids, src_attention_mask, trg_input_ids, trg_attention_mask, 
                 non_pad_position=None, tgt_subsqeunt_mask=None):
 
-        # Pre_setting for variational model and translation task
-        trg_input_ids_copy = trg_input_ids.clone().detach()
-        trg_attention_mask_copy = trg_attention_mask.clone().detach()
-        trg_input_ids = trg_input_ids[:, :-1]
-        trg_attention_mask = trg_attention_mask[:, :-1]
+        # Pre_setting for 
+        decoder_input_ids = self.shift_tokens_right(
+            trg_input_ids, self.pad_idx, self.decoder_start_token_id
+        )
 
         # Input and output embedding sharing mode
         if self.emb_src_trg_weight_sharing:
             src_input_embeds = self.embeddings(src_input_ids)
-            trg_input_embeds = self.embeddings(trg_input_ids)
-            trg_input_embeds_ = self.embeddings(trg_input_ids_copy)
+            trg_input_embeds = self.embeddings(decoder_input_ids)
 
         # Encoder Forward
         if self.emb_src_trg_weight_sharing:
@@ -78,36 +73,14 @@ class custom_Bart(nn.Module):
                                                  attention_mask=src_attention_mask)
             src_encoder_out = src_encoder_out['last_hidden_state']
 
-        # Variational
-        if self.variational_mode != 0:
-            # Target sentence latent mapping
-            if self.emb_src_trg_weight_sharing:
-                trg_encoder_out = self.encoder_model(inputs_embeds=trg_input_embeds_,
-                                                     attention_mask=trg_attention_mask_copy)
-                trg_encoder_out = trg_encoder_out['last_hidden_state']
-            else:
-                trg_encoder_out = self.encoder_model(input_ids=trg_input_ids_copy,
-                                                     attention_mask=trg_attention_mask_copy)
-                trg_encoder_out = trg_encoder_out['last_hidden_state']
-
-            src_encoder_out = src_encoder_out.transpose(0,1)
-            trg_encoder_out = trg_encoder_out.transpose(0,1)
-
-            src_encoder_out, dist_loss = self.latent_module(src_encoder_out, trg_encoder_out)
-            src_encoder_out = src_encoder_out.transpose(0,1)
-        else:
-            dist_loss = torch.tensor(0, dtype=torch.float)
-
         # Decoder
         if self.emb_src_trg_weight_sharing:
             model_out = self.decoder_model(inputs_embeds = trg_input_embeds, 
-                                           attention_mask = trg_attention_mask,
                                            encoder_hidden_states = src_encoder_out,
                                            encoder_attention_mask = src_attention_mask)
             model_out = self.lm_head(model_out['last_hidden_state'])
         else:
             model_out = self.decoder_model(input_ids = trg_input_ids, 
-                                           attention_mask = trg_attention_mask,
                                            encoder_hidden_states = src_encoder_out,
                                            encoder_attention_mask = src_attention_mask)
             model_out = self.lm_head(model_out['last_hidden_state'])
@@ -115,7 +88,7 @@ class custom_Bart(nn.Module):
         if non_pad_position is not None:
             model_out = model_out[non_pad_position]
 
-        return model_out, dist_loss
+        return model_out
 
     def generate(self, src_input_ids, src_attention_mask, device, beam_size: int = 5, repetition_penalty: float = 0.7):
 
@@ -236,3 +209,18 @@ class custom_Bart(nn.Module):
         mask = torch.tril(torch.ones(sz, sz, dtype=torch.float, device=device))
         mask = mask.masked_fill(mask == 0, float('-inf')).masked_fill(mask == 1, 0.0)
         return mask
+
+    def shift_tokens_right(self, input_ids: torch.Tensor, pad_token_id: int, decoder_start_token_id: int):
+        """
+        Shift input ids one token to the right.
+        """
+        shifted_input_ids = input_ids.new_zeros(input_ids.shape)
+        shifted_input_ids[:, 1:] = input_ids[:, :-1].clone()
+        shifted_input_ids[:, 0] = decoder_start_token_id
+
+        if pad_token_id is None:
+            raise ValueError("self.model.config.pad_token_id has to be defined.")
+        # replace possible -100 values in labels by `pad_token_id`
+        shifted_input_ids.masked_fill_(shifted_input_ids == -100, pad_token_id)
+
+        return shifted_input_ids
